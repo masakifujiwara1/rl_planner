@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from nav_msgs.msg import Odometry
 import tf
 import sys
 import copy
@@ -7,16 +6,26 @@ import time
 import os
 import csv
 import math
+import random
 
-from geometry_msgs.msg import PoseWithCovarianceStamped
-from geometry_msgs.msg import PoseStamped
-from geometry_msgs.msg import PoseArray
-from geometry_msgs.msg import Twist
+from gazebo_msgs.srv import GetModelState, SetModelState
+from gazebo_msgs.msg import ModelState
+from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, PoseArray, Twist, Pose
 from sensor_msgs.msg import LaserScan
-from RL_planner_net import *
+from std_srvs.srv import Empty
+from nav_msgs.msg import Odometry
+
+# from RL_planner_net import *
 import rospy
 import roslib
-roslib.load_manifest('RL_planner')
+roslib.load_manifest('rl_planner')
+
+# temp param
+GAZEBO_X = -2.0
+GAZEBO_Y = -0.5
+
+MODEL_NAME = 'turtlebot3_burger'
+
 
 class RL_planner_node:
     def __init__(self):
@@ -58,10 +67,47 @@ class RL_planner_node:
     def loop(self):
         pass
 
+class Gazebo_env:
+    def __init__(self):
+        # rospy.wait_for_service('/gazebo/rest_world')
+        self.reset_world = rospy.ServiceProxy('/gazebo/reset_world', Empty)
+        self.set_pos = rospy.ServiceProxy('/gazebo/set_model_state', SetModelState)
+        self.get_pos = rospy.ServiceProxy('/gazebo/get_model_state', GetModelState)
+
+    def reset_env(self):
+        self.reset_world()
+
+    def get_state(self):
+        resp = self.get_pos(MODEL_NAME, '')
+        get_state = Pose()
+        get_state = resp.pose
+        return get_state
+
+    def set_ang(self):
+        model_state = ModelState()
+        random_ang = random.uniform(-3.14, 3.14)
+        # print(random_ang)
+        quaternion = tf.transformations.quaternion_from_euler(0, 0, random_ang)
+        state = self.get_state()
+        state.orientation.x = quaternion[0]   
+        state.orientation.y = quaternion[1]
+        state.orientation.z = quaternion[2]
+        state.orientation.w = quaternion[3]
+        model_state.model_name = MODEL_NAME
+        model_state.pose = state
+        self.set_pos(model_state)
+
+    def reset_and_set(self):
+        self.reset_env()
+        self.set_ang()
+
 if __name__ == '__main__':
-    rg = nav_cloning_node()
-    DURATION = 0.2
-    r = rospy.Rate(1 / DURATION)
-    while not rospy.is_shutdown():
-        rg.loop()
-        r.sleep()
+    # rg = nav_cloning_node()
+    # DURATION = 0.2
+    # r = rospy.Rate(1 / DURATION)
+    # while not rospy.is_shutdown():
+    #     rg.loop()
+    #     r.sleep()
+    rs = RL_planner_node()
+    rg = Gazebo_env()
+    rg.reset_and_set()
