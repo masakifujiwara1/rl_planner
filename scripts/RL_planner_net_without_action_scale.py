@@ -6,10 +6,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.distributions import Categorical
+from torch.distributions import Categorical, Normal
 import matplotlib.pyplot as plt
 import seaborn as sns
 import RL_settings
+import random
 
 # hyper param
 LOG_SIG_MAX = 2
@@ -26,7 +27,8 @@ if not model_dir_path.exists():
 if not result_dir_path.exists():
     result_dir_path.mkdir()
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = 'cpu'
 
 class MakeState:
     def __init__(self):
@@ -43,7 +45,7 @@ class MakeState:
         target = target.astype(np.float32)
         scan_data_tensor = torch.from_numpy(scan_data).clone()
         target_tensor = torch.from_numpy(target).clone()
-        return scan_data_tensor, target_tensor
+        return scan_data_tensor.to(device), target_tensor.to(device)
 
 class SharedNetwork(nn.Module):
     def __init__(self):
@@ -90,6 +92,7 @@ class ActorNet(nn.Module):
     def sample(self, state):
         mean, log_std = self.forward(state)
         std = log_std.exp()
+        # print(mean, std)
         normal = Normal(mean, std)
         x_t = normal.rsample()
         y_t = torch.tanh(x_t)
@@ -124,13 +127,14 @@ class ActorCriticModel(object):
         self.critic_optim = optim.Adam(self.critic_net.parameters())
 
     def select_action(self, state, evaluate=False):
-        scan_data = torch.FloatTensor(scan_data).unsqueeze(0).to(self.device)
-        target = torch.FloatTensor(target).unsqueeze(0).to(self.device)
+        # scan_data = torch.FloatTensor(scan_data).unsqueeze(0).to(self.device)
+        # target = torch.FloatTensor(target).unsqueeze(0).to(self.device)
         if not evaluate:
             action, _ = self.actor_net.sample(state)
         else:
             _, action = self.actor_net.sample(state)
-        return action.detach().numpy().reshape(-1)
+        action_cpu = action.cpu()
+        return action_cpu.detach().numpy().reshape(-1)
 
     def update_parameters(self, memory, batch_size, updates):
 
@@ -167,17 +171,17 @@ class ActorCriticModel(object):
 
         return critic_loss.item(), actor_loss.item()
 
-    def soft_update(target_net, source_net, tau):
-        for target_param, param in zip(target_net.parameters(), source_net.parameters()):
-            target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
+def soft_update(target_net, source_net, tau):
+    for target_param, param in zip(target_net.parameters(), source_net.parameters()):
+        target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
 
-    def hard_update(target_net, source_net):
-        for target_param, param in zip(target_net.parameters(), source_net.parameters()):
-            target_param.data.copy_(param.data)
+def hard_update(target_net, source_net):
+    for target_param, param in zip(target_net.parameters(), source_net.parameters()):
+        target_param.data.copy_(param.data)
 
-    def convert_network_grad_to_false(network):
-        for param in network.parameters():
-            param.requires_grad = False
+def convert_network_grad_to_false(network):
+    for param in network.parameters():
+        param.requires_grad = False
 
 class ReplayMemory:
     def __init__(self, memory_size):
@@ -192,6 +196,7 @@ class ReplayMemory:
         self.position = (self.position + 1) % self.memory_size
 
     def sample(self, batch_size):
+        print(self.buffer[0], len(self.buffer))
         batch = random.sample(self.buffer, batch_size)
         states, actions, rewards, next_states, dones = map(np.stack, zip(*batch))
         return states, actions, rewards, next_states, dones

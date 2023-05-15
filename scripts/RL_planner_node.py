@@ -7,6 +7,7 @@ import os
 import csv
 import math
 import random
+import numpy as np
 
 from gazebo_msgs.srv import GetModelState, SetModelState
 from gazebo_msgs.msg import ModelState
@@ -35,6 +36,7 @@ class RL_planner_node:
         self.ps_map.header.frame_id = 'map'
         self.scan_sub = rospy.Subscriber('/scan', LaserScan, self.scan_callback)
         self.scan = LaserScan()
+        self.listener = tf.TransformListener()
         self.min_s = 0
 
         self.gazebo_env = Gazebo_env()
@@ -55,15 +57,15 @@ class RL_planner_node:
             'target_update_interval': 1,
             'memory_size': 100000,
             'epochs': 100,
-            'eval_interval': 10,
-            'end_step': 500
+            'eval_interval': 50,
+            'end_step': 500,
         }
         self.reward_args = {
             'r_arrive': 10.0,
             'r_collision': -10.0,
             'Cr': 10.0,
             'Cd': 1, # 直線で何m以内で到達したとみなすか
-            'Co': 0.5, # 何m以内に障害物があれば衝突したとみなすか
+            'Co': 0.2, # 何m以内に障害物があれば衝突したとみなすか
             'r_position': -5.0,
             'ramda_p': 1,
             'ramda_w': 1
@@ -76,6 +78,9 @@ class RL_planner_node:
 
     def scan_callback(self, msg):
         self.scan.ranges = msg.ranges
+        scan_ranges = np.array(self.scan.ranges)
+        scan_ranges[np.isinf(scan_ranges)] = msg.range_max
+        self.scan.ranges = scan_ranges
         self.min_s = min(self.scan.ranges)
 
     def hand_set_target(self, x, y):
@@ -84,11 +89,11 @@ class RL_planner_node:
     
     def tf_target2robot(self):
         try:
-            (trans, rot) = listener.lookupTransform('/odom', '/base_footprint', rospy.Time(0))
+            (trans, rot) = self.listener.lookupTransform('/odom', '/base_footprint', rospy.Time(0))
         except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
             return
 
-        ps_base = listener.transformPose('/odom', ps_map)
+        ps_base = self.listener.transformPose('/odom', self.ps_map)
 
         dx = ps_base.pose.position.x - trans[0]
         dy = ps_base.pose.position.y - trans[1]
@@ -99,8 +104,8 @@ class RL_planner_node:
         (_, _, yaw) = tf.transformations.euler_from_quaternion(quat)
         angle_diff = yaw - tf.transformations.euler_from_quaternion(rot)[2]
 
-        print('Distance: %.2f m' % dist)
-        print('Angle: %.2f rad' % angle_diff)
+        # print('Distance: %.2f m' % dist)
+        # print('Angle: %.2f rad' % angle_diff)
 
         target_l = [dist, angle_diff]
         target_l = np.array(target_l)
@@ -108,6 +113,10 @@ class RL_planner_node:
         return target_l
 
     def next_episode(self):
+        # twist reset
+        self.train.action_twist.linear.x = 0
+        self.train.action_twist.angular.z = 0
+        self.train.action_pub.publish(self.train.action_twist)
         # target set
         self.hand_set_target(X, Y)
         # gazebo reset
@@ -115,7 +124,10 @@ class RL_planner_node:
     
     def loop(self):
         target_l = self.tf_target2robot()
-        state = self.make_state.toState(self.scan.ranges, target_l)
+        state = self.make_state.toState(np.array(list(self.scan.ranges)), target_l)
+
+        #check steps
+        self.end_steps_flag = self.train.check_steps(target_l, self.min_s)
 
         if self.i_episode == self.args['epochs'] + 1:
             # loop end
@@ -132,6 +144,8 @@ class RL_planner_node:
                 # env reset
                 # self.gazebo_env.reset_and_set()
                 self.next_episode()
+                self.train.n_steps = 0
+                self.train.episode_reward = 0
                 self.i_episode += 1
 
                 self.end_steps_flag = False
@@ -151,14 +165,15 @@ class RL_planner_node:
                     # self.gazebo_env.reset_and_set()
                     self.next_episode()
                     self.eval_count += 1
+                    self.train.n_steps = 0
+                    self.train.episode_reward = 0
 
                     self.end_steps_flag = False
                 else:
                     # eval func
                     self.train.evaluate_func(state, target_l, self.min_s)
 
-        #check steps
-        self.end_steps_flag = self.train.check_steps(target_l, self.min_s)
+        print("Episode: {}, Step: {}, Step reward: {:.0f}".format(self.i_episode, self.train.n_steps, self.train.episode_reward))
 
 class Trains:
     def __init__(self, args, reward_args):
@@ -167,7 +182,7 @@ class Trains:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.agent = ActorCriticModel(args=args, device=device)
         self.memory = ReplayMemory(args['memory_size'])
-        self.action_pub = rospy.Publisher('cmd_vel', Twist)
+        self.action_pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
         self.action_twist = Twist()
 
         self.episode_reward_list = []
@@ -183,6 +198,10 @@ class Trains:
         self.init = True
         self.avg_reward = 0.
         # self.state = 1 # robotに対する目標位置
+
+        self.old_action = [0., 0.]
+        self.old_state = 0
+        self.old_target_l = 0
     
     def while_func(self, state, target_l, min_s):
         if self.args['start_steps'] > self.n_steps:
@@ -190,7 +209,7 @@ class Trains:
             self.action[0] = random.uniform(0.1, 0.5)
             self.action[1] = random.uniform(-1.0, 1.0)
         else:
-            self.action = self.agent.select_action(old_state)
+            self.action = self.agent.select_action(self.old_state)
 
         if len(self.memory) > self.args['batch_size']:
             self.agent.update_parameters(self.memory, self.args['batch_size'], self.n_update)
@@ -199,22 +218,23 @@ class Trains:
         # env update
         self.action_twist.linear.x = self.action[0]
         self.action_twist.angular.z = self.action[1]
-        self.action_pub(self.action_twist)
+        self.action_pub.publish(self.action_twist)
 
         if not self.init:
             # next_state, reward, done, _ = env.step(action)
 
-            reward = self.calc_reward(target_l, min_s, old_target_l)
+            reward = self.calc_reward(target_l, min_s, self.old_target_l)
 
             self.n_steps += 1
             self.episode_reward += reward
 
-            self.memory.push(state=old_state, action=old_action, reward=reward, next_state=state, mask=float(not done))
+            self.memory.push(state=self.old_state, action=self.old_action, reward=reward, next_state=state, mask=float(not self.done))
 
         # state = next_state
-        old_state = state
-        old_action = self.action 
-        old_target_l = target_l
+        self.old_state = state
+        self.old_action = self.action
+        self.old_target_l = target_l
+
         self.init = False
 
     def evaluate_func(self, state, target_l, min_s):
@@ -223,11 +243,11 @@ class Trains:
 
         self.action_twist.linear.x = self.action[0]
         self.action_twist.angular.z = self.action[1]
-        self.action_pub(self.action_twist)
+        self.action_pub.publish(self.action_twist)
 
         if not self.init:
-            reawrd = self.calc_reward(target_l, min_s, old_target_l)
-
+            reawrd = self.calc_reward(target_l, min_s, self.old_target_l)
+            self.n_steps += 1
             self.episode_reward += reawrd
 
     def calc_reward(self, target_l, min_s, old_target_l):
@@ -297,12 +317,13 @@ class Gazebo_env:
         self.set_ang()
 
 if __name__ == '__main__':
-    # rg = nav_cloning_node()
-    # DURATION = 0.2
-    # r = rospy.Rate(1 / DURATION)
-    # while not rospy.is_shutdown():
-    #     rg.loop()
-    #     r.sleep()
-    rs = RL_planner_node()
-    rg = Gazebo_env()
-    rg.reset_and_set()
+    rg = RL_planner_node()
+    DURATION = 0.2
+    r = rospy.Rate(1 / DURATION)
+    while not rospy.is_shutdown():
+        rg.loop()
+        r.sleep()
+
+    # rs = RL_planner_node()
+    # rg = Gazebo_env()
+    # rg.reset_and_set()
