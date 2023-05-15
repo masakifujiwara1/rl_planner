@@ -22,6 +22,10 @@ roslib.load_manifest('rl_planner')
 
 MODEL_NAME = 'turtlebot3_burger'
 
+# to do random target position 
+X = 1.5
+Y = 1.5
+
 class RL_planner_node:
     def __init__(self):
         rospy.init_node('RL_planner_node', anonymous=True)
@@ -33,7 +37,13 @@ class RL_planner_node:
         self.scan = LaserScan()
         self.min_s = 0
 
+        self.gazebo_env = Gazebo_env()
+
+        self.end_steps_flag = False
+        self.eval_flag = False
+
         self.i_episode = 1
+        self.eval_count = 0
         self.args = {
             'gamma': 0.99,
             'tau': 0.005,
@@ -67,6 +77,10 @@ class RL_planner_node:
     def scan_callback(self, msg):
         self.scan.ranges = msg.ranges
         self.min_s = min(self.scan.ranges)
+
+    def hand_set_target(self, x, y):
+        self.ps_map.pose.position.x = x
+        self.ps_map.pose.position.y = y
     
     def tf_target2robot(self):
         try:
@@ -92,17 +106,59 @@ class RL_planner_node:
         target_l = np.array(target_l)
 
         return target_l
+
+    def next_episode(self):
+        # target set
+        self.hand_set_target(X, Y)
+        # gazebo reset
+        self.gazebo_env.reset_and_set()
     
     def loop(self):
+        target_l = self.tf_target2robot()
+        state = self.make_state.toState(self.scan.ranges, target_l)
+
         if self.i_episode == self.args['epochs'] + 1:
             # loop end
             pass
-        
-        #check episode
 
-        target_l = self.tf_target2robot()
-        state = self.make_state.toState(self.scan.ranges, target_l)
-        self.train.while_func(state, target_l, self.min_s)
+        if not self.eval_flag:
+            if self.end_steps_flag:
+
+                self.train.episode_reward_list.append(self.train.episode_reward)
+                if self.i_episode % self.args['eval_interval'] == 0:
+                    self.eval_flag = True
+                    self.eval_count = 0
+                
+                # env reset
+                # self.gazebo_env.reset_and_set()
+                self.next_episode()
+                self.i_episode += 1
+
+                self.end_steps_flag = False
+            else:
+                self.train.while_func(state, target_l, self.min_s)
+        else:
+            if self.eval_count == self.args['eval_interval']:
+                self.eval_flag = False
+            else:
+                if self.end_steps_flag:
+                    self.train.avg_reward /= self.args['eval_interval']
+                    self.train.eval_reward_list.append(self.train.avg_reward)
+
+                    print("Episode: {}, Eval Avg. Reward: {:.0f}".format(self.i_episode, self.train.avg_reward))
+
+                    # env reset
+                    # self.gazebo_env.reset_and_set()
+                    self.next_episode()
+                    self.eval_count += 1
+
+                    self.end_steps_flag = False
+                else:
+                    # eval func
+                    self.train.evaluate_func(state, target_l, self.min_s)
+
+        #check steps
+        self.end_steps_flag = self.train.check_steps(target_l, self.min_s)
 
 class Trains:
     def __init__(self, args, reward_args):
@@ -125,6 +181,7 @@ class Trains:
         # self.init = True
         self.action = [0.0, 0.0]
         self.init = True
+        self.avg_reward = 0.
         # self.state = 1 # robotに対する目標位置
     
     def while_func(self, state, target_l, min_s):
@@ -133,7 +190,7 @@ class Trains:
             self.action[0] = random.uniform(0.1, 0.5)
             self.action[1] = random.uniform(-1.0, 1.0)
         else:
-            self.action = self.agent.select_action(state)
+            self.action = self.agent.select_action(old_state)
 
         if len(self.memory) > self.args['batch_size']:
             self.agent.update_parameters(self.memory, self.args['batch_size'], self.n_update)
@@ -160,6 +217,19 @@ class Trains:
         old_target_l = target_l
         self.init = False
 
+    def evaluate_func(self, state, target_l, min_s):
+        with torch.no_grad():
+            self.action = self.agent.select_action(state, evaluate=True)
+
+        self.action_twist.linear.x = self.action[0]
+        self.action_twist.angular.z = self.action[1]
+        self.action_pub(self.action_twist)
+
+        if not self.init:
+            reawrd = self.calc_reward(target_l, min_s, old_target_l)
+
+            self.episode_reward += reawrd
+
     def calc_reward(self, target_l, min_s, old_target_l):
         # rt
         if target_l[0] < self.reward_args['Cd']:
@@ -182,9 +252,15 @@ class Trains:
 
         return reward
 
-    def check_steps(self):
+    def check_steps(self, target_l, min_s):
+        flag = False
         if self.args['end_step'] == self.n_steps:
-
+            flag = True
+        elif target_l[0] < self.reward_args['Cd']:
+            flag = True
+        elif min_s < self.reward_args['Co']:
+            flag = True
+        return flag
 
 class Gazebo_env:
     def __init__(self):
