@@ -36,7 +36,6 @@ class MakeState:
 
     def toState(self, scan_data, target):
         scan_data_tensor, target_tensor = self.toTensor(scan_data, target)
-        # print(scan_data_tensor.shape)
         output_s, _ = torch.min(scan_data_tensor.view(int(SCAN_SAMPLE/MIN_POOLING_K), MIN_POOLING_K), dim=1)
         state = torch.cat([output_s, target_tensor], dim=0)
         return state
@@ -149,12 +148,10 @@ class ActorCriticModel(object):
 
         with torch.no_grad():
             next_state_action, _ = self.actor_net.sample(next_state_batch)
-            # next_q_values_target = self.critic_net_target(next_state_batch, next_state_action)
-            next_q_values_target = self.critic_net_target(next_state_batch)
+            next_q_values_target = self.critic_net_target(next_state_batch, next_state_action)
             next_q_values = reward_batch + mask_batch * self.gamma * next_q_values_target
 
-        # q_values = self.critic_net(state_batch, action_batch)
-        q_values = self.critic_net(state_batch)
+        q_values = self.critic_net(state_batch, action_batch)
         critic_loss = F.mse_loss(q_values, next_q_values)
 
         self.critic_optim.zero_grad()
@@ -162,8 +159,7 @@ class ActorCriticModel(object):
         self.critic_optim.step()
 
         action, _ = self.actor_net.sample(state_batch)
-        # q_values = self.critic_net(state_batch, action)
-        q_values = self.critic_net(state_batch)
+        q_values = self.critic_net(state_batch, action)
         actor_loss = - q_values.mean()
 
         self.actor_optim.zero_grad()
@@ -200,7 +196,7 @@ class ReplayMemory:
         self.position = (self.position + 1) % self.memory_size
 
     def sample(self, batch_size):
-        # print(self.buffer[0], len(self.buffer))
+        print(self.buffer[0], len(self.buffer))
         batch = random.sample(self.buffer, batch_size)
         states, actions, rewards, next_states, dones = map(np.stack, zip(*batch))
         return states, actions, rewards, next_states, dones
