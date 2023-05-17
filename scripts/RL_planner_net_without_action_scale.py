@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import RL_settings
 import random
+# from torch.utils.tensorboard import SummaryWriter
 
 # hyper param
 LOG_SIG_MAX = 2
@@ -52,7 +53,7 @@ class SharedNetwork(nn.Module):
     def __init__(self):
         super(SharedNetwork, self).__init__()
 
-        self.fc1 = nn.Linear(38, 512)
+        self.fc1 = nn.Linear(39, 512)
         self.fc2 = nn.Linear(512, 512)
         self.fc3 = nn.Linear(512, 512)
 
@@ -94,6 +95,26 @@ class ActorNet(nn.Module):
         mean, log_std = self.forward(state)
         std = log_std.exp()
         # print(mean, std)
+        # mean_indices = torch.isnan(mean)
+        # std_indices = torch.isnan(std)
+
+        # if torch.any(mean_indices):
+        #     mean[0] = random.uniform(0.1, 0.5)
+        #     mean[1] = random.uniform(-1.0, 1.0)
+        # if torch.any(std_indices):
+        #     std[0] = random.uniform(0.0, 0.1)
+        #     std[1] = random.uniform(0.0, 0.1)
+
+        while torch.isnan(mean).any():
+            # mean[torch.isnan(mean)][0] = random.uniform(0.1, 0.5)
+            # mean[torch.isnan(mean)][1] = random.uniform(-1.0, 1.0)
+            mean = torch.where(torch.isnan(mean), 0.1, mean)
+
+        while torch.isnan(std).any():
+            # std[torch.isnan(std)][0] = random.uniform(0.0, 0.1)
+            # std[torch.isnan(std)][1] = random.uniform(0.0, 0.1)
+            std = torch.where(torch.isnan(std), 0.1, std)
+
         normal = Normal(mean, std)
         x_t = normal.rsample()
         y_t = torch.tanh(x_t)

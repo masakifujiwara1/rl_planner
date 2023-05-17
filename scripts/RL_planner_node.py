@@ -16,6 +16,8 @@ from sensor_msgs.msg import LaserScan
 from std_srvs.srv import Empty
 from nav_msgs.msg import Odometry
 
+from torch.utils.tensorboard import SummaryWriter
+
 from RL_planner_net_without_action_scale import *
 import rospy
 import roslib
@@ -39,6 +41,9 @@ class RL_planner_node:
         self.listener = tf.TransformListener()
         self.wait_scan = False
         self.min_s = 0
+        self.target_l = 0
+
+        self.writer = SummaryWriter(log_dir='/home/fmasa/catkin_ws/src/rl_planner/runs')
 
         self.gazebo_env = Gazebo_env()
 
@@ -54,31 +59,33 @@ class RL_planner_node:
             'seed': 123456,
             'batch_size': 256,
             'hiden_dim': 256,
-            'start_steps': 1,
+            'start_steps': 10,
             'target_update_interval': 1,
             'memory_size': 100000,
             'epochs': 100,
-            'eval_interval': 1000,
+            'eval_interval': 1000000000000000,
             'end_step': 500,
         }
         self.reward_args = {
             'r_arrive': 10.0,
             'r_collision': -10.0,
             'Cr': 10.0,
-            'Cd': 1, # 直線で何m以内で到達したとみなすか
+            'Cd': 0.5, # 直線で何m以内で到達したとみなすか
             'Co': 0.15, # 何m以内に障害物があれば衝突したとみなすか
             'r_position': -5.0,
             'ramda_p': 1,
-            'ramda_w': 1
+            'ramda_w': 1,
+            'ramda_r': 30
         }
         self.train = Trains(self.args, self.reward_args)
         self.make_state = MakeState()
 
         self.gazebo_env.reset_env()
+        self.gazebo_env.reset_env()
 
         self.hand_set_target(X, Y)
         # print(self.ps_map)
-        time.sleep(1)
+        time.sleep(2)
 
     def target_callback(self, msg):
         self.ps_map.pose = msg.pose
@@ -112,14 +119,17 @@ class RL_planner_node:
         quat = tf.transformations.quaternion_from_euler(0, 0, angle)
         (_, _, yaw) = tf.transformations.euler_from_quaternion(quat)
         angle_diff = yaw - tf.transformations.euler_from_quaternion(rot)[2]
+        robot_angle = tf.transformations.euler_from_quaternion(rot)[2]
 
         # print('Distance: %.2f m' % dist)
         # print('Angle: %.2f rad' % angle_diff)
 
-        target_l = [dist, angle_diff]
-        target_l = np.array(target_l)
+        # print(robot_angle)
 
-        return target_l
+        self.target_l = [dist, angle_diff, robot_angle]
+        self.target_l = np.array(self.target_l)
+
+        return self.target_l
 
     def next_episode(self):
         # twist reset
@@ -130,7 +140,7 @@ class RL_planner_node:
         self.hand_set_target(X, Y)
         # gazebo reset
         self.gazebo_env.reset_and_set()
-        time.sleep(0.5)
+        time.sleep(1)
     
     def loop(self):
         if not self.wait_scan:
@@ -149,6 +159,10 @@ class RL_planner_node:
         if not self.eval_flag:
             if self.end_steps_flag:
 
+                episode_avg_reward = self.train.episode_reward / self.train.n_steps
+                print(episode_avg_reward, self.i_episode)
+                # self.writer.add_scalar("episode per reward", episode_avg_reward, self.i_episode)
+
                 self.train.episode_reward_list.append(self.train.episode_reward)
                 if self.i_episode % self.args['eval_interval'] == 0:
                     self.eval_flag = True
@@ -166,7 +180,8 @@ class RL_planner_node:
                 self.end_steps_flag = False
             else:
                 self.train.while_func(state, target_l, self.min_s)
-                print("Train mode Episode: {}, Step: {}, Step reward: {:.2f}".format(self.i_episode, self.train.n_steps, self.train.reward))
+                self.writer.add_scalar("reward", self.train.reward, self.train.total_n_steps)
+                print("Train mode,  Episode: {}, Total step: {}, Step: {}, Step reward: {:.2f}, target_d: {:.2f}, target_r: {:.2f}, robot_ang: {:.2f}".format(self.i_episode, self.train.total_n_steps, self.train.n_steps, self.train.reward, self.target_l[0], self.target_l[1], self.target_l[2]))
         else:
             if self.eval_count == self.args['eval_interval']:
                 self.eval_flag = False
@@ -213,6 +228,7 @@ class Trains:
         self.eval_reward_list = []
 
         self.n_steps = 0
+        self.total_n_steps = 0
         self.n_update = 0
 
         self.episode_reward = 0
@@ -243,7 +259,9 @@ class Trains:
             self.n_update += 1
 
         # env update
-        self.action_twist.linear.x = abs(self.action[0])
+        # if self.action[0] < 0:
+        #     self.action[0] = 0
+        self.action_twist.linear.x = self.action[0]
         self.action_twist.angular.z = self.action[1]
         self.action_pub.publish(self.action_twist)
 
@@ -253,6 +271,7 @@ class Trains:
             self.reward = self.calc_reward(target_l, min_s, self.old_target_l)
 
             self.n_steps += 1
+            self.total_n_steps += 1
             self.episode_reward += self.reward
 
             self.memory.push(state=self.old_state, action=self.old_action, reward=self.reward, next_state=state, mask=float(not self.done))
@@ -275,13 +294,14 @@ class Trains:
         if not self.init:
             self.reawrd = self.calc_reward(target_l, min_s, self.old_target_l)
             self.n_steps += 1
+            self.total_n_steps += 1
             self.episode_reward += self.reawrd
 
     def calc_reward(self, target_l, min_s, old_target_l):
         # rt
         if target_l[0] < self.reward_args['Cd']:
             rt = self.reward_args['r_arrive']
-        elif min_s < self.reward_args['Co'] + 0.01:
+        elif min_s < self.reward_args['Co'] + 0.02:
             rt = self.reward_args['r_collision']
         else:
             # rt = self.reward_args['Cr'] * (old_target_l[0] - target_l[0])
@@ -299,7 +319,10 @@ class Trains:
         # rwt
         rwt = -1 * abs(target_l[1])
 
-        self.reward = rt + self.reward_args['ramda_p'] * rpt + self.reward_args['ramda_w'] * rwt
+        # self.reward = rt + self.reward_args['ramda_p'] * rpt + self.reward_args['ramda_w'] * rwt
+        self.reward = rt + self.reward_args['ramda_r'] * abs(old_target_l[1] - old_target_l[1])
+        # self.reward = rt
+        # self.reward = rt + self.action[0]
 
         return self.reward
 

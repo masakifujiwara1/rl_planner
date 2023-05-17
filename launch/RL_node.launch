@@ -1,0 +1,4 @@
+<launch>
+    <node pkg="rl_planner" type="tf_map2odom.py" name="tf_map2odom_node" output="screen"/>
+    <node pkg="rl_planner" type="RL_planner_node.py" name="RL_planner_node" output="screen"/>
+</launch>
