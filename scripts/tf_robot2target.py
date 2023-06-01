@@ -24,15 +24,23 @@ def callback(msg):
 
     # 角度の差を計算する
     angle = math.atan2(dy, dx)
-    quat = tf.transformations.quaternion_from_euler(0, 0, angle)
-    (_, _, yaw) = tf.transformations.euler_from_quaternion(quat)
-    angle_diff = yaw - tf.transformations.euler_from_quaternion(rot)[2]
+    robot_ang = tf.transformations.euler_from_quaternion(rot)[2]
+
+    if angle < 0:
+        angle += math.pi * 2
+
+    if robot_ang < 0:
+        robot_ang += math.pi * 2
+
+    angle_diff = angle - robot_ang
+
+    if angle_diff < 0:
+        angle_diff += math.pi * 2
 
     # 結果を表示する
-    # print('robot_x: %.2f m' % trans[0])
-    # print('robot_y: %.2f m' % trans[1])
     print('Distance: %.2f m' % dist)
     print('Angle: %.2f rad' % angle_diff)
+    # print(angle, robot_ang)
 
 if __name__ == '__main__':
     rospy.init_node('goal_converter')
